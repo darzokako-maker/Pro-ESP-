@@ -6,8 +6,9 @@ Engine_classes.hpp'deki offset'leri kullanır
 import struct
 import pymem
 
-PROCESS_NAME = "ProSoccerOnline.exe"
-MODULE_NAME = "ProSoccerOnline.exe"
+# Dinamik olarak algılanacaktır. Varsayılanlar aşağıdadır:
+DEFAULT_PROCESS_NAME = "ProSoccerOnline-Win64-Shipping.exe"
+MODULE_NAME = ""
 
 # HPP'den alınan kesin offset'ler (Engine_classes.hpp'ye göre)
 OFFSETS = {
@@ -91,21 +92,28 @@ def rvec3(pm, addr):
         return (0.0, 0.0, 0.0)
 
 def scan_guobject_array(pm):
-    mod = pymem.process.module_from_name(pm.process_handle, MODULE_NAME)
-    base = mod.lpBaseOfDll
-    size = mod.SizeOfImage
-    data = pm.read_bytes(base, size)
+    try:
+        mod = pymem.process.module_from_name(pm.process_handle, MODULE_NAME)
+        base = mod.lpBaseOfDll
+        size = mod.SizeOfImage
+    except Exception as e:
+        print(f"[!] Modul bilgileri alinamadi: {e}")
+        return 0
+
     pat_len = len(GUOBJECT_SIG)
-    for i in range(size - pat_len):
-        matched = True
-        for j in range(pat_len):
-            if GUOBJECT_MASK[j] and data[i + j] != GUOBJECT_SIG[j]:
-                matched = False
-                break
-        if matched:
-            addr = base + i
-            rel = struct.unpack("<i", pm.read_bytes(addr + 3, 4))[0]
-            return addr + 7 + rel
+    chunk_size = 0x200000
+
+    for start in range(0, size, chunk_size):
+        end = min(start + chunk_size + pat_len, size)
+        try:
+            data = pm.read_bytes(base + start, end - start)
+        except:
+            continue
+        for i in range(len(data) - pat_len):
+            if all(not GUOBJECT_MASK[j] or data[i+j] == GUOBJECT_SIG[j] for j in range(pat_len)):
+                addr = base + start + i
+                rel = struct.unpack("<i", pm.read_bytes(addr + 3, 4))[0]
+                return addr + 7 + rel
     return 0
 
 def read_array(pm, addr):
@@ -123,15 +131,66 @@ def actor_pos(pm, actor):
         return rvec3(pm, root + OFFSETS["USceneComponent::RelativeLocation"])
     return (0.0, 0.0, 0.0)
 
+# ============================================================
+# FNAME RESOLVER (esp.py'den entegre edildi)
+# ============================================================
+class FNameResolver:
+    BLOCK_TABLE_OFFSETS = (0x8, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40)
+
+    def __init__(self, pm, fname_pool):
+        self.pm = pm
+        self.fname_pool = fname_pool
+        self.block_table_off = 0x10
+        self.header_style = "ue5"
+        self._detect_layout()
+
+    def _read_entry(self, entry_id, table_off, style):
+        block_idx = entry_id >> 16
+        within = (entry_id & 0xFFFF) << 1
+        block_addr = rp(self.pm, self.fname_pool + table_off + block_idx * 8)
+        if not block_addr:
+            return None
+        hdr = ru16(self.pm, block_addr + within)
+        length = (hdr >> 6) & 0x3FF if style == "custom" else (hdr & 0x3FF if style == "ue5" else hdr >> 1)
+        is_wide = hdr & 1 if style in ("custom", "ue4") else (hdr >> 10) & 1
+        if length == 0 or length > 512:
+            return None
+        try:
+            raw = self.pm.read_bytes(block_addr + within + 2, length * (2 if is_wide else 1))
+            return raw.decode("utf-16-le" if is_wide else "latin-1", errors="ignore")
+        except:
+            return None
+
+    def _detect_layout(self):
+        for off in self.BLOCK_TABLE_OFFSETS:
+            for style in ("custom", "ue5", "ue4"):
+                try:
+                    if self._read_entry(0, off, style) == "None":
+                        self.block_table_off, self.header_style = off, style
+                        print(f"[+] FName layout tespit edildi: table_off=0x{off:X}, style={style}")
+                        return
+                except:
+                    pass
+
+    def resolve(self, entry_id):
+        try:
+            name = self._read_entry(entry_id, self.block_table_off, self.header_style)
+            if name:
+                return name
+        except:
+            pass
+        return None
+
 class UObjectArray:
-    def __init__(self, pm, guobject_array):
+    def __init__(self, pm, guobject_array, fname_pool):
         self.pm = pm
         self.guobject_array = guobject_array
+        self.fnames = FNameResolver(pm, fname_pool)
 
     def _obj_name(self, obj):
         try:
             name_idx = ru32(self.pm, obj + OFFSETS["UObjectBase::NamePrivate"])
-            return f"obj_{obj:X}_idx{name_idx}"
+            return self.fnames.resolve(name_idx) or f"obj_{obj:X}"
         except:
             return "?"
 
@@ -149,11 +208,39 @@ class UObjectArray:
                     yield obj
 
 def main():
-    try:
-        pm = pymem.Pymem(PROCESS_NAME)
-    except:
-        print(f"[!] {PROCESS_NAME} bulunamadı!")
-        return
+    pm = None
+    process_name = None
+    module_name = None
+
+    for name in ["ProSoccerOnline-Win64-Shipping.exe", "ProSoccerOnline.exe"]:
+        try:
+            pm = pymem.Pymem(name)
+            # Modülün varlığını doğrula
+            pymem.process.module_from_name(pm.process_handle, name)
+            process_name = name
+            module_name = name
+            print(f"[+] Process baglantisi kuruldu: {name}")
+            break
+        except Exception:
+            if pm:
+                try:
+                    pm.close_process()
+                except:
+                    pass
+            continue
+
+    if not pm:
+        try:
+            pm = pymem.Pymem(DEFAULT_PROCESS_NAME)
+            process_name = DEFAULT_PROCESS_NAME
+            module_name = DEFAULT_PROCESS_NAME
+            print(f"[+] Process baglantisi kuruldu: {DEFAULT_PROCESS_NAME}")
+        except Exception as e:
+            print(f"[!] ProSoccerOnline calismiyor! (ProSoccerOnline-Win64-Shipping.exe veya ProSoccerOnline.exe bulunamadi)")
+            return
+
+    global MODULE_NAME
+    MODULE_NAME = module_name
 
     guobj = scan_guobject_array(pm)
     if not guobj:
@@ -161,7 +248,23 @@ def main():
         pm.close_process()
         return
 
-    objects = UObjectArray(pm, guobj)
+    # FNamePool bul (esp.py'den entegre edildi)
+    fname_pool = None
+    for delta in range(0xE0000, 0xF0000, 0x10):
+        test_pool = guobj - delta
+        try:
+            if ru32(pm, test_pool) < 0xFFFF:
+                fname_pool = test_pool
+                print(f"[+] FNamePool bulundu! delta=0x{delta:X}")
+                break
+        except:
+            continue
+
+    if not fname_pool:
+        fname_pool = guobj - 0xE3B40
+        print(f"[-] FNamePool varsayilan secildi: 0x{fname_pool:X}")
+
+    objects = UObjectArray(pm, guobj, fname_pool)
 
     # GameEngine'i bul
     game_engine = None

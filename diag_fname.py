@@ -6,8 +6,8 @@ Uses pattern scanning + heuristics from Engine_classes.hpp
 import struct
 import pymem
 
-PROCESS_NAME = "ProSoccerOnline.exe"
-MODULE_NAME = "ProSoccerOnline.exe"
+# Dinamik olarak algılanacaktır. Varsayılanlar aşağıdadır:
+DEFAULT_PROCESS_NAME = "ProSoccerOnline-Win64-Shipping.exe"
 
 # Pattern from UE5 (valid for all UE5.1+ games)
 GUOBJECT_SIG = bytes([
@@ -35,21 +35,28 @@ def ru32(pm, addr):
         return 0
 
 def scan_guobject_array(pm):
-    mod = pymem.process.module_from_name(pm.process_handle, MODULE_NAME)
-    base = mod.lpBaseOfDll
-    size = mod.SizeOfImage
-    data = pm.read_bytes(base, size)
+    try:
+        mod = pymem.process.module_from_name(pm.process_handle, MODULE_NAME)
+        base = mod.lpBaseOfDll
+        size = mod.SizeOfImage
+    except Exception as e:
+        print(f"[!] Modul bilgileri alinamadi: {e}")
+        return 0
+
     pat_len = len(GUOBJECT_SIG)
-    for i in range(size - pat_len):
-        matched = True
-        for j in range(pat_len):
-            if GUOBJECT_MASK[j] and data[i + j] != GUOBJECT_SIG[j]:
-                matched = False
-                break
-        if matched:
-            addr = base + i
-            rel = struct.unpack("<i", pm.read_bytes(addr + 3, 4))[0]
-            return addr + 7 + rel
+    chunk_size = 0x200000
+
+    for start in range(0, size, chunk_size):
+        end = min(start + chunk_size + pat_len, size)
+        try:
+            data = pm.read_bytes(base + start, end - start)
+        except:
+            continue
+        for i in range(len(data) - pat_len):
+            if all(not GUOBJECT_MASK[j] or data[i+j] == GUOBJECT_SIG[j] for j in range(pat_len)):
+                addr = base + start + i
+                rel = struct.unpack("<i", pm.read_bytes(addr + 3, 4))[0]
+                return addr + 7 + rel
     return 0
 
 def read_name_entry(pm, entry_addr, style):
@@ -81,7 +88,40 @@ def resolve_at(pm, fname_pool, entry_id, table_off, style):
     return read_name_entry(pm, block_addr + within, style)
 
 def main():
-    pm = pymem.Pymem(PROCESS_NAME)
+    pm = None
+    process_name = None
+    module_name = None
+
+    for name in ["ProSoccerOnline-Win64-Shipping.exe", "ProSoccerOnline.exe"]:
+        try:
+            pm = pymem.Pymem(name)
+            # Modülün varlığını doğrula
+            pymem.process.module_from_name(pm.process_handle, name)
+            process_name = name
+            module_name = name
+            print(f"[+] Process baglantisi kuruldu: {name}")
+            break
+        except Exception:
+            if pm:
+                try:
+                    pm.close_process()
+                except:
+                    pass
+            continue
+
+    if not pm:
+        try:
+            pm = pymem.Pymem(DEFAULT_PROCESS_NAME)
+            process_name = DEFAULT_PROCESS_NAME
+            module_name = DEFAULT_PROCESS_NAME
+            print(f"[+] Process baglantisi kuruldu: {DEFAULT_PROCESS_NAME}")
+        except Exception as e:
+            print(f"[!] ProSoccerOnline calismiyor! (ProSoccerOnline-Win64-Shipping.exe veya ProSoccerOnline.exe bulunamadi)")
+            return
+
+    global MODULE_NAME
+    MODULE_NAME = module_name
+
     guobj = scan_guobject_array(pm)
     if guobj == 0:
         print("[!] GUObjectArray bulunamadı!")

@@ -64,8 +64,8 @@ except ImportError:
 # ============================================================
 # OYUN BİLGİLERİ
 # ============================================================
-PROCESS_NAME = "ProSoccerOnline-Win64-Shipping.exe"
-MODULE_NAME = "ProSoccerOnline-Win64-Shipping.exe"
+# Dinamik olarak algılanacaktır. Varsayılanlar aşağıdadır:
+DEFAULT_PROCESS_NAME = "ProSoccerOnline-Win64-Shipping.exe"
 
 # ============================================================
 # LOG
@@ -385,10 +385,10 @@ class ProSoccerESP:
     def __init__(self):
         log_separator()
         log("PRO SOCCER ONLINE ESP v2.0")
-        log(f"Process: {PROCESS_NAME}")
-        log_separator()
         
         self.pm = None
+        self.process_name = None
+        self.module_name = None
         self.guobject_array = 0
         self.fname_pool = 0
         self.objects = None
@@ -396,6 +396,9 @@ class ProSoccerESP:
         self.original_speed = 0.0
         
         self._connect_process()
+        log(f"Process: {self.process_name}")
+        log_separator()
+
         self._init_pattern_scan()
         
         log_separator()
@@ -403,17 +406,37 @@ class ProSoccerESP:
         log_separator()
 
     def _connect_process(self):
+        for name in ["ProSoccerOnline-Win64-Shipping.exe", "ProSoccerOnline.exe"]:
+            try:
+                self.pm = pymem.Pymem(name)
+                # Modülün varlığını doğrula
+                pymem.process.module_from_name(self.pm.process_handle, name)
+                self.process_name = name
+                self.module_name = name
+                success(f"Process baglantisi kuruldu: {name}")
+                return
+            except Exception:
+                if self.pm:
+                    try:
+                        self.pm.close_process()
+                    except:
+                        pass
+                continue
+
+        # Başarısız olursa varsayılan ile dene (ve hata fırlatılmasına izin ver)
+        self.process_name = DEFAULT_PROCESS_NAME
+        self.module_name = DEFAULT_PROCESS_NAME
         try:
-            self.pm = pymem.Pymem(PROCESS_NAME)
-            success(f"Process baglantisi: {PROCESS_NAME}")
+            self.pm = pymem.Pymem(self.process_name)
+            success(f"Process baglantisi: {self.process_name}")
         except Exception as e:
             error(f"Process bulunamadi: {e}")
-            raise RuntimeError(f"{PROCESS_NAME} calismiyor!")
+            raise RuntimeError(f"ProSoccerOnline calismiyor! (ProSoccerOnline-Win64-Shipping.exe veya ProSoccerOnline.exe bulunamadi)")
 
     def _init_pattern_scan(self):
         info("Pattern Scan ile baslatiliyor...")
         
-        scanner = PatternScanner(self.pm, MODULE_NAME)
+        scanner = PatternScanner(self.pm, self.module_name)
         addr = next(scanner.scan_all(GUOBJECT_SIG, GUOBJECT_MASK), 0)
         if not addr:
             raise RuntimeError("GUObjectArray pattern bulunamadi!")
